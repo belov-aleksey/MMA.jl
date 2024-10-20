@@ -6,8 +6,12 @@
 # JA  - Int. J. Numer. Meth. Engng.
 module MMA
 
+using Optim
+
+import LinearAlgebra: dot, norm
+
 import Optim: OnceDifferentiable, Fminbox, GradientDescent, update!, 
-                MultivariateOptimizationResults, OptimizationTrace, Optimizer, optimize, maxdiff
+                MultivariateOptimizationResults, OptimizationTrace, AbstractOptimizer, maxdiff
 import Base: min, max, show
 
 export MMAModel, box!, ineq_constraint!, optimize
@@ -34,7 +38,7 @@ macro mmatrace()
     end)
 end
 
-struct MMA87 <: Optimizer end
+struct MMA87 <: AbstractOptimizer end
 
 struct MMAModel
     dim::Int
@@ -160,6 +164,7 @@ end
 
 function optimize(m::MMAModel, x0::Vector{Float64})
     check_error(m, x0)
+    time_start = time()
     n_i = length(constraints(m))
     n_j = dim(m)
     x0, x, x1, x2 = copy(x0), copy(x0), copy(x0), copy(x0)
@@ -193,7 +198,7 @@ function optimize(m::MMAModel, x0::Vector{Float64})
     # Create a DualData type that holds the data needed for the dual problem
     dual_data = DualData(L, U, α, β, p0, q0, p, q, r, 0.0, x, f_x, g, ∇f_x, ∇g)
 
-    tr = OptimizationTrace{MMA87}()
+    tr = OptimizationTrace{Float64, MMA87}()
     tracing = (m.store_trace || m.extended_trace || m.show_trace)
 
     converged = false
@@ -219,7 +224,11 @@ function optimize(m::MMAModel, x0::Vector{Float64})
         dual(λ) = compute_dual!(λ, dual_data) #Lagrangian dual objective value
         dual_grad(grad_dual, λ) = compute_dual_grad!(grad_dual, λ, dual_data)
         d = OnceDifferentiable(dual, dual_grad, λ)
-        results = optimize(d, λ, l, u, Fminbox{GradientDescent}())
+        results = Optim.optimize(d, l, u, λ, Fminbox(Optim.GradientDescent()),
+            Optim.Options(
+                x_tol=xtol(m), f_tol=ftol(m), g_tol=grtol(m), 
+                outer_iterations = m.max_iters, iterations = m.max_iters)
+            )
         # Use previously converged λ as starting guess
         copy!(λ, results.minimizer)
         update_x!(dual_data, λ)
@@ -240,9 +249,13 @@ function optimize(m::MMAModel, x0::Vector{Float64})
             break
         end
     end
+    # need for Optim.MultivariateOptimizationResults
     h_calls = 0
+    ls_success = true
+    time_limit = Inf
+    time_run = time() - time_start
+    stopped_by = :NoStop    
     return MultivariateOptimizationResults(MMA87(),
-                                           false,
                                            x0,
                                            x,
                                            f_x,
@@ -250,9 +263,13 @@ function optimize(m::MMAModel, x0::Vector{Float64})
                                            k == m.max_iters,
                                            x_converged,
                                            xtol(m),
+                                           1e-3, # Not used
+                                           x_residual,
                                            x_residual,
                                            f_converged,
                                            ftol(m),
+                                           1e-3, # Not used
+                                           f_residual,
                                            f_residual,
                                            gr_converged,
                                            grtol(m),
@@ -261,7 +278,12 @@ function optimize(m::MMAModel, x0::Vector{Float64})
                                            tr,
                                            f_calls,
                                            g_calls,
-                                           h_calls)
+                                           h_calls,
+                                           ls_success,
+                                           time_limit,
+                                           time_run,
+                                           stopped_by
+                                           )
 end
 
 # Updates p0, q0, p, q, r and returns r0.
@@ -338,6 +360,13 @@ function update_limits!(dual_data, m, k, x1, x2)
             end
         end
     end
+end
+
+function scale!(vec, scale_factor)
+    for i in eachindex(vec)
+        vec[i] = vec[i] * scale_factor
+    end
+    return
 end
 
 function matdot(A::Vector, B::Matrix, j::Int)
